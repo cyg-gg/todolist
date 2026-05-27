@@ -1,0 +1,59 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: todolist-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: todolist
+    ports:
+      - "3306:3306"
+    volumes:
+      - todolist-mysql-data:/var/lib/mysql
+    networks:
+      - todolist-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    image: todolist-backend:latest
+    container_name: todolist-backend
+    restart: always
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      DB_NAME: todolist
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-todolist-secret}
+    ports:
+      - "3000:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - todolist-net
+
+  frontend:
+    build: ./frontend
+    image: todolist-frontend:latest
+    container_name: todolist-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - todolist-net
+
+volumes:
+  todolist-mysql-data:
+
+networks:
+  todolist-net:
+    driver: bridge

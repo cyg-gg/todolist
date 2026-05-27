@@ -11,37 +11,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build backend image
-        run: |
-          docker build -t todolist-backend:latest ./backend
-
-      - name: Save backend image
-        run: docker save todolist-backend:latest -o backend.tar
-
-      - name: Build frontend image
-        run: |
-          docker build -t todolist-frontend:latest ./frontend
-
-      - name: Save frontend image
-        run: docker save todolist-frontend:latest -o frontend.tar
-
-      - name: Create deploy scripts tar
-        run: |
-          mkdir -p scripts
-          cp docker-compose.yml scripts/
-          tar czf deploy-scripts.tar.gz -C scripts docker-compose.yml
-
-      - name: Upload to server
-        uses: appleboy/scp-action@v0.1.7  # 稳定版本
+      - name: Upload project to server
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "backend.tar,frontend.tar,deploy-scripts.tar.gz"
-          target: "/root/todolist-deploy/"
+          source: "docker-compose.yml,backend/,frontend/"
+          target: "/root/todolist/"
+          strip_components: 0
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -50,18 +28,10 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            mkdir -p /root/todolist
             cd /root/todolist
 
-            # 加载镜像
-            docker load -i /root/todolist-deploy/backend.tar
-            docker load -i /root/todolist-deploy/frontend.tar
-
-            # 解压部署脚本
-            tar xzf /root/todolist-deploy/deploy-scripts.tar.gz -C /root/todolist/
-
-            # 生成 .env (secrets wrapped in single quotes to prevent remote shell injection)
-            cat > /root/todolist/.env << 'ENVEOP'
+            # 生成 .env
+            cat > /root/todolist/.env << 'ENVEOF'
             MYSQL_ROOT_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}'
             DB_HOST=mysql
             DB_PORT=3306
@@ -71,15 +41,14 @@ jobs:
             PORT=3000
             JWT_SECRET='${{ secrets.JWT_SECRET }}'
             VITE_API_BASE_URL=http://${{ secrets.SERVER_IP }}:3000/api
-            ENVEOP
+            ENVEOF
 
-            # 重启容器 (assuming SERVER_USER is root - /root/ path is intentional)
+            # 构建并启动容器
             docker-compose down 2>/dev/null || true
             docker image prune -f
-            docker-compose up -d
+            docker-compose up -d --build
 
-            # 健康检查: docker-compose.yml使用depends_on with healthcheck condition,
-            # backend服务会等待MySQL就绪后启动, 15s足够backend完成初始化
-            sleep 15
+            # 健康检查
+            sleep 20
             curl -sf http://localhost:3000/health || { echo "Health check failed"; exit 1; }
             echo "Deployment successful"

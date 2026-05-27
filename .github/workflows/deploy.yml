@@ -11,37 +11,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build backend image
-        run: |
-          docker build -t todolist-backend:latest ./backend || { echo "Backend build failed"; exit 1; }
-
-      - name: Save backend image
-        run: docker save todolist-backend:latest -o backend.tar
-
-      - name: Build frontend image
-        run: |
-          docker build -t todolist-frontend:latest ./frontend || { echo "Frontend build failed"; exit 1; }
-
-      - name: Save frontend image
-        run: docker save todolist-frontend:latest -o frontend.tar
-
-      - name: Create deploy scripts tar
-        run: |
-          mkdir -p scripts
-          cp docker-compose.yml scripts/
-          tar czf deploy-scripts.tar.gz -C scripts docker-compose.yml
-
-      - name: Upload to server
+      - name: Upload docker-compose.yml to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "backend.tar,frontend.tar,deploy-scripts.tar.gz"
-          target: "/root/todolist-deploy/"
+          source: "docker-compose.yml"
+          target: "/root/todolist/"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -52,13 +29,6 @@ jobs:
           script: |
             mkdir -p /root/todolist
             cd /root/todolist
-
-            # 加载镜像
-            docker load -i /root/todolist-deploy/backend.tar
-            docker load -i /root/todolist-deploy/frontend.tar
-
-            # 解压部署脚本
-            tar xzf /root/todolist-deploy/deploy-scripts.tar.gz -C /root/todolist/
 
             # 生成 .env
             cat > /root/todolist/.env << 'ENVEOP'
@@ -75,7 +45,6 @@ jobs:
 
             # 重启容器
             docker-compose down 2>/dev/null || true
-            docker image prune -f
             docker-compose up -d
 
             sleep 15

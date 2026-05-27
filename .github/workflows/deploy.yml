@@ -61,17 +61,17 @@ jobs:
             tar xzf /root/todolist-deploy/deploy-scripts.tar.gz -C /root/todolist/
 
             # 生成 .env (secrets wrapped in single quotes to prevent remote shell injection)
-            cat > /root/todolist/.env << 'ENVEOF'
-MYSQL_ROOT_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}'
-DB_HOST=mysql
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}'
-DB_NAME=todolist
-PORT=3000
-JWT_SECRET='${{ secrets.JWT_SECRET }}'
-VITE_API_BASE_URL=http://${{ secrets.SERVER_IP }}:3000/api
-ENVEOF
+            cat > /root/todolist/.env << 'ENVEOP'
+            MYSQL_ROOT_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}'
+            DB_HOST=mysql
+            DB_PORT=3306
+            DB_USER=root
+            DB_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}'
+            DB_NAME=todolist
+            PORT=3000
+            JWT_SECRET='${{ secrets.JWT_SECRET }}'
+            VITE_API_BASE_URL=http://${{ secrets.SERVER_IP }}:3000/api
+            ENVEOP
 
             # 重启容器 (assuming SERVER_USER is root - /root/ path is intentional)
             docker-compose down 2>/dev/null || true

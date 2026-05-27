@@ -174,8 +174,8 @@ app.delete('/api/todos/:id', auth, async (req, res) => {
 (async () => {
   try {
     await initDatabase();
-    app.listen(PORT, () => {
-      console.log(`Server is running on http://localhost:${PORT}`);
+    app.listen(3000, '0.0.0.0', () => {
+      console.log('Server is running on http://0.0.0.0:3000');
     });
   } catch (error) {
     console.error('数据库初始化失败：', error.message);

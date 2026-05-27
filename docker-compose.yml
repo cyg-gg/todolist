@@ -19,7 +19,6 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
     image: todolist-backend:latest
     container_name: todolist-backend
     restart: always
@@ -40,7 +39,6 @@ services:
       - todolist-net
 
   frontend:
-    build: ./frontend
     image: todolist-frontend:latest
     container_name: todolist-frontend
     restart: always

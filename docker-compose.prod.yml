@@ -1,0 +1,86 @@
+# =============================================================
+# docker-compose.prod.yml — 生产环境部署（ECS 本地 build，无镜像仓库）
+# 说明：
+#   - 源码由 GitHub Actions 通过 SSH 传输到 ECS 的 /root/todolist
+#   - 前端和后端镜像在 ECS 上本地构建（不使用 Docker Hub / ACR）
+#   - MySQL 使用官方镜像，数据持久化到 Docker Volume
+#   - 所有容器设置 restart: always，服务器重启后自动启动
+# =============================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: todolist-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-todolist2024}
+      MYSQL_DATABASE: todolist
+    ports:
+      - "3306:3306"
+    volumes:
+      - todolist-mysql-data:/var/lib/mysql
+    networks:
+      - todolist-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-todolist2024}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: todolist-backend:latest
+    container_name: todolist-backend
+    restart: always
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-todolist2024}
+      DB_NAME: todolist
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-todolist-jwt-secret-change-me}
+    ports:
+      - "3000:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - todolist-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: todolist-frontend:latest
+    container_name: todolist-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - todolist-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  todolist-mysql-data:
+    driver: local
+
+networks:
+  todolist-net:
+    driver: bridge

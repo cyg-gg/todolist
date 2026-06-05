@@ -1,344 +1,235 @@
-# TodoList 部署手册（Ubuntu + Docker + Vercel）
+# TodoList 项目 Docker + GitHub Actions 全自动部署指南（零外部镜像仓库方案）
 
-这个项目分成 3 部分：
-
-- 前端：Vue 3
-- 后端：Node.js + Express
-- 数据库：MySQL
-
-推荐部署方式：
-
-- 前端部署到 Vercel
-- 后端部署到 Ubuntu 服务器上的 Docker
-- MySQL 部署到同一台服务器的 Docker 容器，或者云数据库
+> 技术栈：Vue3 前端 + Express 后端 + MySQL 数据库  
+> 部署方式：GitHub Actions → SCP 传输源码 → SSH 远程 → ECS 本地 docker build + docker compose up  
+> 服务器：阿里云 ECS Ubuntu，公网 IP `39.97.238.25`，端口 80（前端）/ 3000（后端）
+>
+> **核心特点：不依赖 Docker Hub / ACR 等任何外部镜像仓库，镜像在 ECS 上本地构建**
 
 ---
 
-## 一、你要先准备什么
+## 一、整体流程图
 
-你需要有：
-
-- 一台阿里云 Ubuntu 服务器
-- 一个 GitHub 仓库
-- 一个域名（可选，但建议有）
-- MySQL 数据库账号密码
-
----
-
-## 二、在服务器上安装 Docker
-
-先 SSH 登录你的 Ubuntu 服务器，然后执行：
-
-```bash
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg git
-curl -fsSL https://get.docker.com | sudo sh
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo usermod -aG docker $USER
+```
+本地 git push main
+        │
+        ▼
+GitHub Actions 触发
+        │
+        ▼
+  ┌──────────────────────────────────────────┐
+  │  Job: Deploy to ECS                      │
+  │                                          │
+  │  Step 1: Checkout 拉取仓库代码            │
+  │           ↓                              │
+  │  Step 2: SCP 传输源码到 ECS /root/todolist│
+  │           ↓                              │
+  │  Step 3: SSH 远程执行部署：               │
+  │    ① 写入 .env 环境变量                   │
+  │    ② docker compose build（本地构建镜像）  │
+  │    ③ docker compose down（停止旧容器）     │
+  │    ④ docker compose up -d（启动新容器）    │
+  │    ⑤ 健康检查                             │
+  │    ⑥ 清理旧镜像                           │
+  └──────────────────────────────────────────┘
+        │
+        ▼
+   ✅ 部署完成
 ```
 
-执行完以后，退出 SSH 再重新登录一次。
+---
 
-然后检查：
+## 二、GitHub Secrets 配置
+
+进入：GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret
+
+| Secret 名称 | 值 | 说明 |
+|---|---|---|
+| `ALIYUN_ECS_IP` | `39.97.238.25` | 阿里云 ECS 公网 IP |
+| `ALIYUN_ECS_USERNAME` | `root` | SSH 登录用户名 |
+| `ALIYUN_ECS_SSH_KEY` | （SSH 私钥完整内容） | 见下方生成步骤 |
+| `MYSQL_ROOT_PASSWORD` | 自定义强密码 | 例：`Todolist@2024!` |
+| `JWT_SECRET` | 随机字符串 | 例：`aB3xK9mP2qR7vW5yZ1` |
+
+**与旧方案的区别：不再需要 `DOCKER_HUB_USERNAME` 和 `DOCKER_HUB_TOKEN` 两个 Secret！**
+
+---
+
+## 三、ALIYUN_ECS_SSH_KEY 获取方式
+
+在服务器上执行 `scripts/server-init.sh` 会自动生成并打印私钥，或手动执行：
 
 ```bash
+# SSH 登录服务器
+ssh root@39.97.238.25
+
+# 生成专用密钥对
+ssh-keygen -t ed25519 -C "github-actions-deploy" \
+  -f /root/.ssh/github_actions_deploy -N ""
+
+# 将公钥加入信任列表
+cat /root/.ssh/github_actions_deploy.pub >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+
+# 查看私钥内容（复制全部粘贴到 GitHub Secret）
+cat /root/.ssh/github_actions_deploy
+```
+
+> ⚠️ 复制私钥时，必须包含 `-----BEGIN OPENSSH PRIVATE KEY-----` 和 `-----END OPENSSH PRIVATE KEY-----` 这两行！
+
+---
+
+## 四、首次服务器环境准备
+
+**登录服务器后，一次性执行：**
+
+```bash
+ssh root@39.97.238.25
+
+# 复制以下全部命令粘贴执行：
+apt-get update -y && apt-get upgrade -y
+
+# 安装 Docker（官方源）
+apt-get install -y ca-certificates curl gnupg lsb-release
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 启动 Docker 并设置开机自启
+systemctl enable docker && systemctl start docker
+
+# 验证安装
 docker --version
+docker compose version
+
+# 创建部署目录
+mkdir -p /root/todolist
+
+# 开放防火墙端口
+ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 3000/tcp
+ufw --force enable
+
+# 生成 SSH 密钥（供 GitHub Actions 使用）
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f /root/.ssh/github_actions_deploy -N ""
+cat /root/.ssh/github_actions_deploy.pub >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+
+# 打印私钥（复制到 GitHub Secrets）
+echo "=== 私钥内容（复制到 ALIYUN_ECS_SSH_KEY）==="
+cat /root/.ssh/github_actions_deploy
+echo "=== 私钥内容结束 ==="
+
+# 预拉取 MySQL 镜像（加速首次部署）
+docker pull mysql:8.0
 ```
 
-如果有版本号，说明成功了。
+**同时务必在「阿里云控制台 → ECS → 安全组」中开放入方向规则：**
+
+| 协议 | 端口 | 授权对象 | 说明 |
+|---|---|---|---|
+| TCP | 22 | 0.0.0.0/0 | SSH 远程连接 |
+| TCP | 80 | 0.0.0.0/0 | 前端 HTTP 访问 |
+| TCP | 3000 | 0.0.0.0/0 | 后端 API 访问 |
 
 ---
 
-## 三、启动 MySQL
+## 五、项目文件结构说明
 
-如果你希望数据库也放在这台服务器上，可以直接用 Docker 跑 MySQL。
-
-### 1. 创建数据卷
-
-```bash
-docker volume create todolist-mysql-data
 ```
-
-### 2. 启动 MySQL 容器
-
-把密码改成你自己的：
-
-```bash
-docker run -d \
-  --name todolist-mysql \
-  --restart always \
-  -e MYSQL_ROOT_PASSWORD=你的MySQL密码 \
-  -e MYSQL_DATABASE=todolist \
-  -p 3306:3306 \
-  -v todolist-mysql-data:/var/lib/mysql \
-  mysql:8.0
-```
-
-### 3. 检查容器
-
-```bash
-docker ps
-```
-
-看到 `todolist-mysql` 就说明运行成功。
-
----
-
-## 四、导入建表脚本
-
-项目里已经有 `backend/schema.sql`，它会创建：
-
-- `users`
-- `todos`
-
-还会插入一条初始化数据。
-
-### 导入方法
-
-如果服务器上有 `mysql` 命令：
-
-```bash
-mysql -h 127.0.0.1 -u root -p todolist < backend/schema.sql
-```
-
-如果没有这个命令，也可以进入容器执行。
-
----
-
-## 五、配置后端环境变量
-
-进入后端目录：
-
-```bash
-cd backend
-```
-
-创建 `.env` 文件：
-
-```bash
-nano .env
-```
-
-填入：
-
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的MySQL密码
-DB_NAME=todolist
-PORT=3000
-JWT_SECRET=换成一个足够长的随机字符串
+todolist/
+├── .github/
+│   └── workflows/
+│       └── deploy.yml              ← CI/CD 主配置（无镜像仓库版）
+├── backend/
+│   ├── Dockerfile                  ← 后端镜像构建文件
+│   ├── .dockerignore               ← 后端构建排除
+│   ├── src/                        ← Express 后端源码
+│   └── package.json
+├── frontend/
+│   ├── Dockerfile                  ← 前端镜像构建文件（多阶段：build + nginx）
+│   ├── .dockerignore               ← 前端构建排除
+│   ├── nginx.conf                  ← 前端 Nginx 反向代理配置
+│   ├── src/                        ← Vue3 前端源码
+│   └── package.json
+├── docker-compose.prod.yml         ← 生产部署配置（使用 build 指令本地构建）
+├── .dockerignore                   ← 根目录 Docker 构建排除
+└── scripts/
+    └── server-init.sh              ← 服务器初始化脚本
 ```
 
 ---
 
-## 六、启动后端
+## 六、与旧方案的区别
 
-后端已经准备了 `Dockerfile`，直接构建并运行：
+| 项目 | 旧方案（Docker Hub） | 新方案（本地 build） |
+|---|---|---|
+| 镜像存储 | 推送到 Docker Hub | ECS 本地构建，不推送 |
+| 依赖的外部服务 | Docker Hub | 无 |
+| GitHub Secrets | 7 个 | 5 个 |
+| 部署速度 | 快（拉取已构建的镜像） | 中等（需在 ECS 上编译） |
+| 磁盘占用 | 小（只存当前版本镜像） | 稍大（有 node_modules 缓存） |
+| 适用场景 | 生产环境高频部署 | 个人项目 / 演示项目 |
+| `docker-compose.prod.yml` | `image:` 拉取远程镜像 | `build:` 本地构建 |
 
-```bash
-docker build -t todolist-backend .
-docker run -d \
-  --name todolist-backend \
-  --restart always \
-  --env-file .env \
-  -p 3000:3000 \
-  todolist-backend
-```
+---
 
-查看日志：
-
-```bash
-docker logs -f todolist-backend
-```
-
-健康检查：
+## 七、推送触发部署
 
 ```bash
-curl http://127.0.0.1:3000/health
-```
-
-正常应该返回：
-
-```json
-{"message":"ok"}
+# 完成代码修改后
+git add .
+git commit -m "feat: 更新功能"
+git push origin main
+# ↑ 推送后 GitHub Actions 自动触发，约 3-6 分钟完成部署
 ```
 
 ---
 
-## 七、配置前端环境变量
-
-进入前端目录：
+## 八、常用排查命令
 
 ```bash
-cd frontend
-```
+# 查看所有容器状态
+docker ps -a
 
-创建 `.env`：
+# 查看后端日志（最后100行，持续输出）
+docker logs todolist-backend --tail=100 -f
 
-```bash
-nano .env
-```
+# 查看前端日志
+docker logs todolist-frontend --tail=50
 
-本地开发时写：
+# 重启单个容器
+docker restart todolist-backend
 
-```env
-VITE_API_BASE_URL=http://127.0.0.1:3000/api
-```
+# 手动重新部署（服务器上执行）
+cd /root/todolist
+docker compose -f docker-compose.prod.yml build --no-cache backend frontend
+docker compose -f docker-compose.prod.yml down
+docker compose -f docker-compose.prod.yml up -d
 
-如果上线了，就改成你的线上后端地址：
-
-```env
-VITE_API_BASE_URL=https://api.你的域名.com/api
-```
-
----
-
-## 八、前端部署到 Vercel
-
-在 Vercel 中导入前端项目。
-
-### 构建设置
-
-- Framework Preset：Vite
-- Build Command：`npm run build`
-- Output Directory：`dist`
-
-### 环境变量
-
-添加：
-
-```env
-VITE_API_BASE_URL=https://api.你的域名.com/api
+# 清理无用镜像和构建缓存
+docker image prune -af
+docker builder prune -f
 ```
 
 ---
 
-## 九、配置 Nginx 反向代理
+## 九、访问地址
 
-如果你没有自己的域名，也可以先直接用服务器公网 IP 访问后端。
-
-### 安装 Nginx
-
-```bash
-sudo apt install -y nginx
-```
-
-### 使用项目里的 Nginx 配置模板
-
-项目中已经准备了一个 Nginx 模板文件：
-
-```text
-backend/nginx.conf
-```
-
-把里面的 `server_name _;` 保持不变即可，表示它接收服务器上的默认访问请求。
-
-然后把这个文件复制到 Nginx 配置目录：
-
-```bash
-sudo cp backend/nginx.conf /etc/nginx/sites-available/default
-sudo nginx -t
-sudo systemctl reload nginx
-```
+| 服务 | 地址 |
+|---|---|
+| 前端页面 | http://39.97.238.25 |
+| 后端 API | http://39.97.238.25:3000 |
+| 健康检查 | http://39.97.238.25:3000/health |
 
 ---
 
-## 十、开启 HTTPS
+## 十、容器开机自启说明
 
-安装 certbot：
+所有容器在 `docker-compose.prod.yml` 中均已配置 `restart: always`，意味着：
 
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-```
-
-申请证书：
-
-```bash
-sudo certbot --nginx -d api.xxx.com
-```
-
-前端域名也可以用同样方式配置 HTTPS。
-
----
-
-## 十一、GitHub Actions 自动部署思路
-
-你后面可以把代码推到 GitHub，然后设置自动化流程：
-
-- 前端代码变更后自动构建并部署到 Vercel
-- 后端代码变更后自动构建 Docker 镜像
-- 服务器拉取最新镜像并重启容器
-
-如果你需要，我下一步可以直接帮你写 `.github/workflows` 文件。
-
----
-
-## 十二、你现在最简单的执行顺序
-
-你可以按这个顺序来：
-
-1. 在服务器安装 Docker
-2. 启动 MySQL 容器
-3. 导入 `backend/schema.sql`
-4. 创建 `backend/.env`
-5. 构建并启动后端容器
-6. 给前端配置 `VITE_API_BASE_URL`
-7. 把前端部署到 Vercel
-8. 用 `backend/nginx.conf` 配置域名反向代理
-9. 配置 HTTPS
-
----
-
-## 十三、你可以直接用的环境变量示例
-
-### 后端 `.env`
-
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的MySQL密码
-DB_NAME=todolist
-PORT=3000
-JWT_SECRET=replace_with_a_secure_secret
-```
-
-### 前端 `.env`
-
-```env
-VITE_API_BASE_URL=http://127.0.0.1:3000/api
-```
-
----
-
-## 十四、检查清单
-
-部署完成后，确认下面这些都正常：
-
-- `docker ps` 能看到 MySQL 和后端容器
-- `curl http://127.0.0.1:3000/health` 能返回 `ok`
-- 前端页面能打开
-- 能注册
-- 能登录
-- 能新增待办
-- 能完成/取消完成
-- 能删除待办
-
----
-
-## 十五、如果你看不懂怎么操作
-
-你可以直接把下面信息发给我，我帮你继续往下做：
-
-- 你的阿里云服务器公网 IP
-- 你的服务器公网 IP
-- 你的 MySQL 密码是否已经设置好
-
-我也可以继续帮你生成：
-
-- GitHub Actions 自动部署文件
-- 更完整的 Nginx/HTTPS 配置
-- 服务器一键部署脚本
+- ECS 服务器重启后，Docker 会自动启动（`systemctl enable docker` 已配置）
+- Docker 启动后，所有配置了 `restart: always` 的容器会自动恢复运行
+- 无需任何手动干预

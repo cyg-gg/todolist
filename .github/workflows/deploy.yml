@@ -1,89 +1,134 @@
+# =============================================================
+# GitHub Actions 自动部署工作流（零外部镜像仓库方案）
+#
+# 流程：推送代码 → SCP 传输源码到 ECS → SSH 远程执行：
+#       1. 写入 .env 环境变量
+#       2. docker compose build（在 ECS 本地构建镜像）
+#       3. docker compose up -d（停止旧容器 + 启动新容器）
+#       4. 健康检查 + 清理旧镜像
+#
+# 依赖的 GitHub Secrets（见下方说明）：
+#   ALIYUN_ECS_IP         ECS 公网 IP
+#   ALIYUN_ECS_USERNAME   SSH 用户名
+#   ALIYUN_ECS_SSH_KEY    SSH 私钥（用于免密登录）
+#   MYSQL_ROOT_PASSWORD   MySQL root 密码
+#   JWT_SECRET            JWT 签名密钥
+# =============================================================
+
 name: Deploy to Alibaba Cloud ECS
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:   # 允许在 GitHub Actions 页面手动触发
 
 env:
+  # ECS 上的部署目录
   DEPLOY_DIR: /root/todolist
 
 jobs:
   deploy:
-    name: Build & Deploy
+    name: "🚀 Deploy to ECS"
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. 拉取代码 ──────────────────────────────────────────
-      - name: Checkout code
+      # ──────────────────────────────────────────────────────
+      # Step 1：拉取仓库代码
+      # ──────────────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. 将项目源码同步到 ECS ───────────────────────────────
-      - name: Sync source code to ECS via SCP
+      # ──────────────────────────────────────────────────────
+      # Step 2：将项目源码传输到 ECS 部署目录
+      # ──────────────────────────────────────────────────────
+      - name: Sync source code to ECS
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.ALIYUN_ECS_IP }}
+          host:     ${{ secrets.ALIYUN_ECS_IP }}
           username: ${{ secrets.ALIYUN_ECS_USERNAME }}
-          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
-          source: "docker-compose.yml,backend/,frontend/"
-          target: "${{ env.DEPLOY_DIR }}"
+          key:      ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          source:   "."
+          target:   "${{ env.DEPLOY_DIR }}"
+          rm:       false
           strip_components: 0
+          overwrite: true
 
-      # ── 3. SSH 到 ECS 执行部署 ───────────────────────────────
-      - name: Deploy on ECS via SSH
+      # ──────────────────────────────────────────────────────
+      # Step 3：SSH 远程执行部署脚本
+      # ──────────────────────────────────────────────────────
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.ALIYUN_ECS_IP }}
-          username: ${{ secrets.ALIYUN_ECS_USERNAME }}
-          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
-          command_timeout: 600s
+          host:            ${{ secrets.ALIYUN_ECS_IP }}
+          username:        ${{ secrets.ALIYUN_ECS_USERNAME }}
+          key:             ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          command_timeout: 15m
           script: |
             set -e
             cd ${{ env.DEPLOY_DIR }}
 
-            echo "====== [1/5] 写入环境变量文件 ======"
-            cat > .env << 'ENVEOF'
+            echo "══════════════════════════════════════"
+            echo "  [1/7] 写入生产环境变量 .env"
+            echo "══════════════════════════════════════"
+            cat > .env <<'DOTENV'
             MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
-            DB_HOST=mysql
-            DB_PORT=3306
-            DB_USER=root
-            DB_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
-            DB_NAME=todolist
-            PORT=3000
             JWT_SECRET=${{ secrets.JWT_SECRET }}
-            ENVEOF
+            DOTENV
 
-            echo "====== [2/5] 停止旧容器 ======"
-            docker compose down --remove-orphans 2>/dev/null || docker-compose down --remove-orphans 2>/dev/null || true
+            echo "══════════════════════════════════════"
+            echo "  [2/7] 拉取 MySQL 基础镜像（缓存加速）"
+            echo "══════════════════════════════════════"
+            docker pull mysql:8.0 || true
 
-            echo "====== [3/5] 清理悬空镜像（节省磁盘）======"
-            docker image prune -f
+            echo "══════════════════════════════════════"
+            echo "  [3/7] 构建前后端镜像（无缓存，确保使用最新代码）"
+            echo "══════════════════════════════════════"
+            docker compose -f docker-compose.prod.yml build \
+              --no-cache \
+              backend frontend
 
-            echo "====== [4/5] 重新构建并启动所有容器 ======"
-            if docker compose version &>/dev/null; then
-              docker compose up -d --build
-            else
-              docker-compose up -d --build
-            fi
+            echo "══════════════════════════════════════"
+            echo "  [4/7] 停止并删除旧容器"
+            echo "══════════════════════════════════════"
+            docker compose -f docker-compose.prod.yml down \
+              --remove-orphans 2>/dev/null || true
 
-            echo "====== [5/5] 健康检查 ======"
-            echo "等待服务启动（30s）..."
-            sleep 30
+            echo "══════════════════════════════════════"
+            echo "  [5/7] 启动新容器（后台运行）"
+            echo "══════════════════════════════════════"
+            docker compose -f docker-compose.prod.yml up -d
 
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
+            echo "══════════════════════════════════════"
+            echo "  [6/7] 健康检查（等待容器启动 40s）"
+            echo "══════════════════════════════════════"
+            sleep 40
+
+            # 后端健康检查
+            HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              http://localhost:3000/health || echo "000")
             if [ "$HTTP_STATUS" = "200" ]; then
               echo "✅ 后端健康检查通过 (HTTP $HTTP_STATUS)"
             else
-              echo "❌ 后端健康检查失败 (HTTP $HTTP_STATUS)"
-              docker compose ps 2>/dev/null || docker-compose ps 2>/dev/null
-              docker compose logs --tail=50 2>/dev/null || docker-compose logs --tail=50 2>/dev/null
+              echo "❌ 后端健康检查失败 (HTTP $HTTP_STATUS)，输出日志："
+              docker logs todolist-backend --tail=50 2>/dev/null || true
               exit 1
             fi
 
-            FRONT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 || echo "000")
+            # 前端健康检查
+            FRONT_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+              http://localhost:80 || echo "000")
             if [ "$FRONT_STATUS" = "200" ]; then
               echo "✅ 前端健康检查通过 (HTTP $FRONT_STATUS)"
             else
-              echo "⚠️  前端响应码 $FRONT_STATUS（非200，请手动确认）"
+              echo "⚠️  前端响应码：$FRONT_STATUS（请手动确认）"
             fi
 
-            echo "🚀 部署完成！访问地址：http://${{ secrets.ALIYUN_ECS_IP }}"
+            echo "══════════════════════════════════════"
+            echo "  [7/7] 清理旧镜像，释放磁盘空间"
+            echo "══════════════════════════════════════"
+            docker image prune -af
+
+            echo ""
+            echo "🎉 部署完成！"
+            echo "   前端访问地址：http://${{ secrets.ALIYUN_ECS_IP }}"
+            echo "   后端 API 地址：http://${{ secrets.ALIYUN_ECS_IP }}:3000"

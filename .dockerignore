@@ -13,7 +13,7 @@
 *.pid
 npm-debug.log*
 
-# 本地开发 node_modules（服务器镜像内会重新安装）
+# 本地开发 node_modules（镜像内会重新安装）
 node_modules
 **/node_modules
 
@@ -22,11 +22,11 @@ frontend/dist
 frontend/.env.local
 frontend/.env.development
 
-# 后端环境变量（线上由 docker-compose.yml 注入环境变量，不打包进镜像）
+# 后端环境变量（线上由 docker-compose.prod.yml 注入，不打包进镜像）
 backend/.env
 backend/.env.local
 
-# 文档 & 脚本（不需要进镜像）
+# 文档 & 脚本（不进镜像）
 docs
 *.md
 *.sh
